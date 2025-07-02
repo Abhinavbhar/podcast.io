@@ -5,6 +5,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/websocket/v2"
 )
 
 func main() {
@@ -21,6 +22,6 @@ func main() {
 	app.Post("/login", routes.Login)
 	app.Post("/signup", routes.Signup)
 	app.Post("/upload/start", routes.NewVide)
-
+	app.Get("/ws", websocket.New(routes.WebSocket))
 	app.Listen(":8080")
 }

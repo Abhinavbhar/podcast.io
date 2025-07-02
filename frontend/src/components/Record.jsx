@@ -1,7 +1,13 @@
 import { useState, useRef, useEffect } from 'react';
     import axios from 'axios';
     function Record() {
-  const [isRecording, setIsRecording] = useState(false);
+  const [socket, setSocket] = useState(null);
+const remoteRef = useRef(null);
+const pc = useRef(null);
+const roomId = "video-room"; // You can make this dynamic if needed
+
+      const [isRecording, setIsRecording] = useState(false);
+
   const [recordedBlob, setRecordedBlob] = useState(null);
   const videoRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -20,11 +26,66 @@ import { useState, useRef, useEffect } from 'react';
     })
     videoId.current=responseStart.data.videoId
     console.log(responseStart.data,"videoId")
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    videoRef.current.srcObject = stream;
 
-    const mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
-    mediaRecorderRef.current = mediaRecorder;
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+videoRef.current.srcObject = stream;
+
+// 1. Setup MediaRecorder
+const mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+mediaRecorderRef.current = mediaRecorder;
+
+// 2. Setup WebRTC
+pc.current = new RTCPeerConnection({
+  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+});
+stream.getTracks().forEach(track => pc.current.addTrack(track, stream));
+
+// 3. Setup WebSocket
+const ws = new WebSocket("ws://localhost:8080/ws");
+ws.onmessage = async (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.roomId !== roomId) return;
+
+  if (msg.type === "offer") {
+    await pc.current.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.data)));
+    const answer = await pc.current.createAnswer();
+    await pc.current.setLocalDescription(answer);
+    ws.send(JSON.stringify({ type: "answer", data: JSON.stringify(answer), roomId }));
+  } else if (msg.type === "answer") {
+    await pc.current.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.data)));
+  } else if (msg.type === "candidate") {
+    const candidate = new RTCIceCandidate(JSON.parse(msg.data));
+    pc.current.addIceCandidate(candidate);
+  }
+};
+
+ws.onopen = async () => {
+  const offer = await pc.current.createOffer();
+  await pc.current.setLocalDescription(offer);
+  ws.send(JSON.stringify({ type: "offer", data: JSON.stringify(offer), roomId }));
+};
+
+pc.current.onicecandidate = (event) => {
+  if (event.candidate) {
+    ws.send(JSON.stringify({
+      type: 'candidate',
+      data: JSON.stringify(event.candidate),
+      roomId,
+    }));
+  }
+};
+
+pc.current.ontrack = (event) => {
+  if (remoteRef.current) {
+    remoteRef.current.srcObject = event.streams[0];
+  }
+};
+
+setSocket(ws);
+
+
+    const mediaRecorder1 = new MediaRecorder(stream, { mimeType: 'video/webm' });
+    mediaRecorderRef.current = mediaRecorder1;
      
     setIsRecording(true);
     mediaRecorder.ondataavailable = async (event) => {
@@ -102,6 +163,8 @@ import { useState, useRef, useEffect } from 'react';
           Download Recording
         </button>
       )}
+      <video ref={remoteRef} autoPlay playsInline className="w-full max-w-md border border-blue-500 mt-4"></video>
+
     </div>
   );
 }

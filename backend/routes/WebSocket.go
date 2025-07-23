@@ -1,62 +1,84 @@
 package routes
 
 import (
+	"encoding/json"
+	"log"
 	"sync"
 
 	"github.com/gofiber/websocket/v2"
 )
 
-type Message struct {
-	RoomID string `json:"roomId"`
-	Type   string `json:"type"` // "offer", "answer", "candidate"
-	Data   string `json:"data"`
+/* ---------- message shape (exactly what the browser sends) ------------ */
+type WSMessage struct {
+	RoomID string          `json:"roomId"`
+	Type   string          `json:"type"`           // join-room / offer / answer / ice
+	Data   json.RawMessage `json:"data,omitempty"` // raw SDP or ICE blob
 }
 
+/* ---------- room registry --------------------------------------------- */
 var (
-	rooms   = make(map[string][]*websocket.Conn)
-	roomMux = sync.Mutex{}
+	rooms   = map[string]map[*websocket.Conn]struct{}{} // room → set of sockets
+	roomMux sync.Mutex
 )
 
-// HandleWebSocket handles the signaling logic per client connection
-func WebSocket(c *websocket.Conn) {
+/* ---------- websocket handler ----------------------------------------- */
+func SignalHandler(c *websocket.Conn) {
 	defer c.Close()
 
-	var currentRoom string
+	var roomID string
 
 	for {
-		var msg Message
+		var msg WSMessage
 		if err := c.ReadJSON(&msg); err != nil {
-			break
+			break // client closed
 		}
 
-		// On first message, join room
-		if currentRoom == "" {
-			currentRoom = msg.RoomID
-			roomMux.Lock()
-			rooms[currentRoom] = append(rooms[currentRoom], c)
-			roomMux.Unlock()
-		}
-
-		// Broadcast to all clients in the same room (except self)
-		roomMux.Lock()
-		for _, conn := range rooms[msg.RoomID] {
-			if conn != c {
-				conn.WriteJSON(msg)
+		/* first message must be join-room */
+		if roomID == "" {
+			if msg.Type != "join-room" || msg.RoomID == "" {
+				return
 			}
+			roomID = msg.RoomID
+
+			roomMux.Lock()
+			if rooms[roomID] == nil {
+				rooms[roomID] = make(map[*websocket.Conn]struct{})
+			}
+			rooms[roomID][c] = struct{}{}
+			roomMux.Unlock()
+
+			log.Printf("client joined %s (%d/∞)\n", roomID, len(rooms[roomID]))
+
+			/* notify existing peers so they re-offer */
+			broadcast(roomID, c, WSMessage{RoomID: roomID, Type: "join-room"})
+			continue
 		}
-		roomMux.Unlock()
+
+		/* relay offer / answer / ice */
+		if msg.Type == "offer" || msg.Type == "answer" || msg.Type == "ice" {
+			broadcast(roomID, c, msg)
+		}
 	}
 
-	// Clean up from room on disconnect
-	if currentRoom != "" {
+	/* ------- cleanup -------- */
+	if roomID != "" {
 		roomMux.Lock()
-		clients := rooms[currentRoom]
-		for i, conn := range clients {
-			if conn == c {
-				rooms[currentRoom] = append(clients[:i], clients[i+1:]...)
-				break
-			}
+		delete(rooms[roomID], c)
+		if len(rooms[roomID]) == 0 {
+			delete(rooms, roomID)
 		}
 		roomMux.Unlock()
+		log.Println("socket left", roomID)
+	}
+}
+
+/* relay to everyone else in the room */
+func broadcast(roomID string, sender *websocket.Conn, msg WSMessage) {
+	roomMux.Lock()
+	defer roomMux.Unlock()
+	for peer := range rooms[roomID] {
+		if peer != sender {
+			_ = peer.WriteJSON(msg)
+		}
 	}
 }

@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { Camera, Mic, MicOff, Video, VideoOff, Settings, Volume2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { v4 as uuidv4 } from 'uuid';
+
 
 function Preview() {
     const navigate = useNavigate()
@@ -114,7 +116,9 @@ function Preview() {
       </div>
     );
   }
-
+  const JoinStudio=()=>{
+    
+  }
   return (
     <div className="min-h-screen bg-gray-900 text-white">
       <div className="container mx-auto px-4 py-8">
@@ -257,12 +261,16 @@ function Preview() {
               </div>
 
               {/* Join Button */}
-              <button
-                onClick={() => navigate('/call/:123')}
-                className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-4 px-6 rounded-lg transition-colors duration-200 flex items-center justify-center space-x-2"
-              >
-                <span>Join Studio</span>
-              </button>
+             <button
+  onClick={() => {
+    const roomId = uuidv4(); // Generate a unique room ID
+    navigate(`/call/${roomId}/true`); // Navigate to that room
+  }}
+  className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-4 px-6 rounded-lg transition-colors duration-200 flex items-center justify-center space-x-2"
+>
+  <span>Join Studio</span>
+</button>
+
             </div>
           </div>
         </div>

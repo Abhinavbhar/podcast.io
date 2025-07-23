@@ -1,173 +1,252 @@
-import { useState, useRef, useEffect } from 'react';
-    import axios from 'axios';
-    function Record() {
-  const [socket, setSocket] = useState(null);
-const remoteRef = useRef(null);
-const pc = useRef(null);
-const roomId = "video-room"; // You can make this dynamic if needed
+import { useEffect, useRef, useState } from 'react';
+import { useParams } from 'react-router-dom';
+import axios from 'axios';
 
-      const [isRecording, setIsRecording] = useState(false);
+export default function SimpleCall() {
+  /* ------------- URL params & role ------------------ */
+  const { roomId, creator } = useParams();
+  const isHost = creator === 'true';
 
-  const [recordedBlob, setRecordedBlob] = useState(null);
-  const videoRef = useRef(null);
-  const mediaRecorderRef = useRef(null);
-  const chunksRef = useRef([]);
-  var chunksCounter=1;
-  var uploadedCounter=1;
-  const blobMap = useRef({})
-  const urlMap=useRef({})
-  const userid = localStorage.getItem('userId')
-  const videoId=useRef()
-   const handleStart = async () => {
-    const responseStart = await axios.post('http://localhost:8080/upload/start',{
-      userid,
-      title:"video",
-      
-    })
-    videoId.current=responseStart.data.videoId
-    console.log(responseStart.data,"videoId")
+  /* ------------- refs ------------------------------- */
+  const localVideo     = useRef(null);
+  const remoteVideo    = useRef(null);
+  const pcRef          = useRef(null);
+  const wsRef          = useRef(null);
+  const localStreamRef = useRef(null);
+  const iceQueue       = useRef([]);      // ICE before remote-SDP
 
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-videoRef.current.srcObject = stream;
+  /* ------------- recording refs --------------------- */
+  const mediaRecRef    = useRef(null);
+  const blobMap        = useRef({});      // { 1:Blob, 2:Blob, … }
+  const videoId        = useRef(null);
+  const chunkCount     = useRef(1);       // next index in blobMap
+  const uploadCount    = useRef(1);       // next index to upload
 
-// 1. Setup MediaRecorder
-const mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
-mediaRecorderRef.current = mediaRecorder;
+  /* ------------- state ------------------------------ */
+  const [remoteOn,    setRemoteOn]    = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
 
-// 2. Setup WebRTC
-pc.current = new RTCPeerConnection({
-  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-});
-stream.getTracks().forEach(track => pc.current.addTrack(track, stream));
+  /* ==================================================
+     life-cycle
+  ================================================== */
+  useEffect(() => { start(); return stop; }, []);
 
-// 3. Setup WebSocket
-const ws = new WebSocket("ws://localhost:8080/ws");
-ws.onmessage = async (event) => {
-  const msg = JSON.parse(event.data);
-  if (msg.roomId !== roomId) return;
+  /* ==================================================
+     peer-connection helpers
+  ================================================== */
+  function newPeerConnection() {
+    const pc = new RTCPeerConnection({
+      iceServers:[{ urls:'stun:stun.l.google.com:19302' }]
+    });
 
-  if (msg.type === "offer") {
-    await pc.current.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.data)));
-    const answer = await pc.current.createAnswer();
-    await pc.current.setLocalDescription(answer);
-    ws.send(JSON.stringify({ type: "answer", data: JSON.stringify(answer), roomId }));
-  } else if (msg.type === "answer") {
-    await pc.current.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.data)));
-  } else if (msg.type === "candidate") {
-    const candidate = new RTCIceCandidate(JSON.parse(msg.data));
-    pc.current.addIceCandidate(candidate);
+    /* add local tracks */
+    localStreamRef.current.getTracks()
+      .forEach(t => pc.addTrack(t, localStreamRef.current));
+
+    pc.ontrack = e => {
+      remoteVideo.current.srcObject = e.streams[0];
+      setRemoteOn(true);
+    };
+
+    pc.onicecandidate = e => {
+      if (e.candidate && wsRef.current?.readyState === 1) {
+        wsRef.current.send(JSON.stringify({
+          type:'ice', roomId, data:e.candidate.toJSON()
+        }));
+      }
+    };
+
+    return pc;
   }
-};
 
-ws.onopen = async () => {
-  const offer = await pc.current.createOffer();
-  await pc.current.setLocalDescription(offer);
-  ws.send(JSON.stringify({ type: "offer", data: JSON.stringify(offer), roomId }));
-};
+  /* ==================================================
+     start call
+  ================================================== */
+  async function start() {
+    /* 1. camera / mic */
+    localStreamRef.current =
+      await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+    localVideo.current.srcObject = localStreamRef.current;
 
-pc.current.onicecandidate = (event) => {
-  if (event.candidate) {
-    ws.send(JSON.stringify({
-      type: 'candidate',
-      data: JSON.stringify(event.candidate),
-      roomId,
-    }));
+    /* 2. peer */
+    pcRef.current = newPeerConnection();
+
+    /* 3. websocket signalling */
+    const ws = new WebSocket('ws://localhost:8080/ws');
+    wsRef.current = ws;
+
+    ws.onopen = () => ws.send(JSON.stringify({ type:'join-room', roomId }));
+    ws.onmessage = async ({ data }) => {
+      const msg = JSON.parse(data);
+      if (msg.roomId !== roomId) return;
+
+      switch (msg.type) {
+        case 'join-room':
+          if (isHost) await sendOffer();
+          break;
+
+        case 'offer':
+          if (isHost) break;                            // ignore own offer
+          await resetPeer();
+          await pcRef.current.setRemoteDescription(msg.data);
+          await addQueuedIce();
+          const answer = await pcRef.current.createAnswer();
+          await pcRef.current.setLocalDescription(answer);
+          ws.send(JSON.stringify({ type:'answer', roomId, data:answer }));
+          break;
+
+        case 'answer':
+          if (!isHost) break;
+          await pcRef.current.setRemoteDescription(msg.data);
+          await addQueuedIce();
+          break;
+
+        case 'ice':
+          const cand = new RTCIceCandidate(msg.data);
+          if (pcRef.current.remoteDescription)
+            await pcRef.current.addIceCandidate(cand);
+          else
+            iceQueue.current.push(cand);
+          break;
+      }
+    };
   }
-};
 
-pc.current.ontrack = (event) => {
-  if (remoteRef.current) {
-    remoteRef.current.srcObject = event.streams[0];
+  async function sendOffer() {
+    await resetPeer();
+    const offer = await pcRef.current.createOffer();
+    await pcRef.current.setLocalDescription(offer);
+    wsRef.current.send(JSON.stringify({ type:'offer', roomId, data:offer }));
   }
-};
 
-setSocket(ws);
+  async function resetPeer() {
+    pcRef.current?.close();
+    pcRef.current = newPeerConnection();
+    setRemoteOn(false);
+    iceQueue.current = [];
+  }
 
+  async function addQueuedIce() {
+    while (iceQueue.current.length) {
+      await pcRef.current.addIceCandidate(iceQueue.current.shift());
+    }
+  }
 
-    const mediaRecorder1 = new MediaRecorder(stream, { mimeType: 'video/webm' });
-    mediaRecorderRef.current = mediaRecorder1;
-     
+  /* ==================================================
+     recording & chunk upload
+  ================================================== */
+  async function startRecording() {
+    /* 1. tell backend we’re starting a new video */
+    const { data } = await axios.post('http://localhost:8080/upload/start', {
+      userid: localStorage.getItem('userId'),
+      title:  'video'
+    });
+    videoId.current = data.videoId;
+
+    /* 2. create MediaRecorder on the EXISTING local stream */
+    const mr = new MediaRecorder(localStreamRef.current,
+                                 { mimeType:'video/webm' }); // supported by Chrome, FF[2]
+    mediaRecRef.current = mr;
     setIsRecording(true);
-    mediaRecorder.ondataavailable = async (event) => {
-      // pushing the new blob every second to the full video 
-      //client will push video id (unique) and which part is chunk of the video 
-      
-      const blob = new Blob([event.data],{type:'video/webm'})
-      blobMap[chunksCounter]=blob
-      chunksCounter++;
-      console.log(chunksCounter)
-      console.log("blob pushed")
-      console.log(blobMap[chunksCounter])
-      chunksRef.current.push(event.data);
-      await handleChunkUpload()
-      
-    
-    };
-    mediaRecorder.start(20000);
 
-    
-    mediaRecorder.onstop = () => {
-      const blob = new Blob(chunksRef.current, { type: 'video/webm' });
-      setRecordedBlob(blob);
+    mr.ondataavailable = async (evt) => {
+      if (!evt.data || evt.data.size === 0) return;
+      const idx  = chunkCount.current;
+      const blob = new Blob([evt.data], { type:'video/webm' });
+      blobMap.current[idx] = blob;
+      chunkCount.current  += 1;
+      await uploadChunk(idx);               // fire-and-await to keep order
     };
-   
-  };
-  const handleChunkUpload=async()=>{
-    const putUrl= await axios.post('http://localhost:8080/upload/chunk-upload',{
-      chunkUserId:userid,
-      "videoid":videoId.current,
-      chunkId:uploadedCounter,
-    })
 
-    const bucketResponse = await axios.put(putUrl.data.signedUrl,blobMap[uploadedCounter],{ headers: {
-        'Content-Type': 'video/webm',
-      }})
-      console.log(putUrl)
-      console.log(bucketResponse)
-      uploadedCounter++;
+    mr.start(20_000);                       // emit data every 20 s
   }
- 
-   const handleStop = () => {
-    mediaRecorderRef.current.stop();
+
+  async function uploadChunk(idx) {
+    try {
+      /* a) obtain signed PUT URL for this chunk */
+      const { data } = await axios.post(
+        'http://localhost:8080/upload/chunk-upload',
+        {
+          chunkUserId: localStorage.getItem('userId'),
+          videoid:     videoId.current,
+          chunkId:     idx,
+        }
+      );
+
+      /* b) PUT the blob directly to storage */
+      await axios.put(
+        data.signedUrl,
+        blobMap.current[idx],
+        { headers:{ 'Content-Type':'video/webm' } }
+      );
+
+      uploadCount.current = idx + 1;        // advance pointer on success
+    } catch (err) {
+      console.error(`chunk ${idx} failed`, err);
+      /* simple retry once after 2 s; production could back-off & persist queue */
+      setTimeout(() => uploadChunk(idx), 2_000);
+    }
+  }
+
+  function stopRecording() {
+    mediaRecRef.current?.stop();
     setIsRecording(false);
-  };
+  }
 
-  const handleDownload = () => {
+  /* ==================================================
+     cleanup
+  ================================================== */
+  function stop() {
+    stopRecording();
+    wsRef.current?.close();
+    pcRef.current?.close();
+    localStreamRef.current?.getTracks().forEach(t => t.stop());
+  }
 
-    const orderedBlobs = Object.keys(blobMap)
-  .sort((a, b) => Number(a) - Number(b)) // sort keys numerically
-  .map(key => blobMap[key]);
-  const finalBlob = new Blob(orderedBlobs, { type: 'video/webm' });
-    const url = URL.createObjectURL(finalBlob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'recording.webm';
-    a.click();
-  };
-
+  /* ==================================================
+     UI
+  ================================================== */
   return (
-    <div className="min-h-screen bg-gray-100 p-8">
-      <h1 className="text-xl font-bold mb-4">Record Video & Audio</h1>
-      <button 
-        className="bg-red-500 text-white px-4 py-2 rounded mb-4"
-        onClick={isRecording ? handleStop : handleStart}
-      >
-        {isRecording ? 'Stop Recording' : 'Start Recording'}
-      </button>
-      <video ref={videoRef} autoPlay playsInline muted className="w-full max-w-md border border-black"></video>
-      {recordedBlob && (
-        <button 
-          className="bg-blue-500 text-white px-4 py-2 rounded mt-4"
-          onClick={handleDownload}
-        >
-          Download Recording
-        </button>
-      )}
-      <video ref={remoteRef} autoPlay playsInline className="w-full max-w-md border border-blue-500 mt-4"></video>
+    <div style={{ padding:20, fontFamily:'sans-serif' }}>
+      <h2>{ isHost ? 'HOST' : 'GUEST' } – room { roomId }</h2>
 
+      {/* record controls */}
+      <button
+        style={{ marginBottom:10 }}
+        onClick={ isRecording ? stopRecording : startRecording }
+      >
+        { isRecording ? 'Stop recording' : 'Start recording' }
+      </button>
+
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:20 }}>
+        {/* local */}
+        <div style={{ border:'1px solid #ccc' }}>
+          <p style={{ margin:4 }}>Local</p>
+          <video ref={ localVideo } autoPlay muted playsInline
+                 style={{ width:'100%', background:'#000' }} />
+        </div>
+
+        {/* remote */}
+        <div style={{ border:'1px solid #0af' }}>
+          <p style={{ margin:4 }}>Remote</p>
+
+          { !remoteOn && (
+            <div style={{
+              width:'100%', aspectRatio:'16/9',
+              display:'flex', alignItems:'center', justifyContent:'center',
+              background:'#111', color:'#888'
+            }}>
+              waiting …
+            </div>
+          )}
+
+          <video ref={ remoteVideo } autoPlay playsInline
+                 style={{
+                   width:'100%', background:'#000',
+                   display: remoteOn ? 'block' : 'none'
+                 }} />
+        </div>
+      </div>
     </div>
   );
 }
-
-export default Record;
-// need to work on failure when a request fails 

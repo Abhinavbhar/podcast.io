@@ -10,18 +10,20 @@ import (
 
 func main() {
 	app := fiber.New()
-	// Enable CORS for all origins
 	app.Use(cors.New(cors.Config{
 		AllowOrigins: "*",
-		AllowHeaders: "*", // Optional: allows all headers
+		AllowHeaders: "*",
 	}))
 
+	/* other REST endpoints … */
 	routes.InitMinio("localhost:9000", "minioadmin", "minioadmin123", false)
-
 	app.Post("/upload/chunk-upload", routes.UploadHandler)
 	app.Post("/login", routes.Login)
 	app.Post("/signup", routes.Signup)
 	app.Post("/upload/start", routes.NewVide)
-	app.Get("/ws", websocket.New(routes.WebSocket))
+
+	/* NEW – web-socket signalling */
+	app.Get("/ws", websocket.New(routes.SignalHandler))
+
 	app.Listen(":8080")
 }

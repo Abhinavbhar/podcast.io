@@ -1,5 +1,6 @@
 # podcast.io
-A podcast platform that records in the best quality from the browser 
+
+A podcast platform that records in the best quality from the browser
 🎙️ podcast.io
 
 podcast.io is a self-hosted, high-fidelity recording platform inspired by Riverside.fm. It enables remote podcast recording with local track uploads, backend processing, and final downloadable media — built using a modern, scalable stack.
@@ -16,16 +17,16 @@ podcast.io is a self-hosted, high-fidelity recording platform inspired by Rivers
 🧱 Project Structure
 
 podcast.io/
-├── client/                 # React frontend
-│   ├── components/
-│   ├── pages/
-│   ├── hooks/
-│   └── utils/
-├── server/                 # Golang backend
-│   ├── handlers/
-│   ├── routes/
-│   ├── services/           # Chunk logic, ffmpeg utils
-│   └── main.go
+├── client/ # React frontend
+│ ├── components/
+│ ├── pages/
+│ ├── hooks/
+│ └── utils/
+├── server/ # Golang backend
+│ ├── handlers/
+│ ├── routes/
+│ ├── services/ # Chunk logic, ffmpeg utils
+│ └── main.go
 └── README.md
 
 🛠️ Features
@@ -59,16 +60,16 @@ You can copy-paste these into your terminal to spin up MongoDB and MinIO contain
 MongoDB
 
 docker run -d --name mongo \
-  -p 27017:27017 \
-  mongo:latest
+ -p 27017:27017 \
+ mongo:latest
 
 MinIO
 
 docker run -d --name minio \
-  -p 9000:9000 -p 9001:9001 \
-  -e "MINIO_ROOT_USER=minioadmin" \
-  -e "MINIO_ROOT_PASSWORD=minioadmin" \
-  quay.io/minio/minio server /data --console-address ":9001"
+ -p 9000:9000 -p 9001:9001 \
+ -e "MINIO_ROOT_USER=minioadmin" \
+ -e "MINIO_ROOT_PASSWORD=minioadmin" \
+ quay.io/minio/minio server /data --console-address ":9001"
 
 MinIO Console: http://localhost:9001
 Access Key: minioadmin
@@ -128,6 +129,5 @@ Code Style Guidelines
 This project is open-source and available under the MIT License.
 
 Let me know if you want to add a logo/banner or badges (like build status, license, etc.)!
-
 
 ChatGPT can make mistakes. Check important info. See Cookie Preferences.

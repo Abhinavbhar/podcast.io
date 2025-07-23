@@ -23,7 +23,7 @@ function App() {
           }
         />
         <Route
-          path='/call/:roomId'
+          path='/call/:roomId/:creator'
           element={
             <ProtectedRoute>
               <Record />
